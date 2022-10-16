@@ -144,6 +144,14 @@ func (d *Duel) Embed(guildID string) interface{} {
 				break
 			}
 		}
+		spectators := ""
+		for spectator, _ := range leaderboards[d.GuildID].Spectators {
+			if spectators != "" {
+				spectators += ", "
+			}
+			spectators += mention(spectator, guildID, false)
+		}
+		duelEmbed.AddField("Spectators", spectators)
 	} else {	
 		timeLeft := d.Expires.Sub(time.Now())
 		if timeLeft.Minutes() < 1 {

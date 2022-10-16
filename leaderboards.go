@@ -543,6 +543,23 @@ func (l *Leaderboard) DuelEnd(duel *Duel) {
 			l.Players[winner].ImmuneUntil = time.Now().AddDate(0, 0, 1)
 		}
 
+		losers := ""
+		for _, loser := range duel.Losers {
+			if losers != "" {
+				losers += ", "
+			}
+			losers += fmt.Sprintf("**%d** - %s", duel.DuelStats[loser].FinalScore, mention(loser, l.GuildID, false))
+			l.Players[loser].MatchesLost++
+		}
+
+		duelEmbed := duel.Embed(l.GuildID).(*embed.Embed)
+		if !duel.Unranked {
+			_, err := Discord.ChannelMessageSendComplex(l.ChannelResults, &discordgo.MessageSend{
+				Embed: duelEmbed.MessageEmbed,
+			})
+			log.Trace(err)
+		}
+
 		//Apply leaderboard progression for the winner
 		if !duel.Unranked {
 			if len(duel.Winners) == 1 {
@@ -560,23 +577,6 @@ func (l *Leaderboard) DuelEnd(duel *Duel) {
 				}
 				l.ApplyRank(duel.Winners[0], l.Ranks[wRI].Rank, wRP, true, true)
 			}
-		}
-
-		losers := ""
-		for _, loser := range duel.Losers {
-			if losers != "" {
-				losers += ", "
-			}
-			losers += fmt.Sprintf("**%d** - %s", duel.DuelStats[loser].FinalScore, mention(loser, l.GuildID, false))
-			l.Players[loser].MatchesLost++
-		}
-
-		duelEmbed := duel.Embed(l.GuildID).(*embed.Embed)
-		if !duel.Unranked {
-			_, err := Discord.ChannelMessageSendComplex(l.ChannelResults, &discordgo.MessageSend{
-				Embed: duelEmbed.MessageEmbed,
-			})
-			log.Trace(err)
 		}
 
 		l.ArchiveDuel(activeIndex)
