@@ -291,6 +291,18 @@ func init() {
 			},
 		},
 	}
+	cmdQuote := &discordgo.ApplicationCommand{
+		Name: "quote",
+		Description: "Sets the winner's quote for a duel before posting the result",
+		Options: []*discordgo.ApplicationCommandOption{
+			&discordgo.ApplicationCommandOption{
+				Name: "quote",
+				Description: "The quote to be posted for the winner",
+				Type: discordgo.ApplicationCommandOptionString,
+				Required: true,
+			},
+		},
+	}
 	cmdSteamID := &discordgo.ApplicationCommand{
 		Name: "steamid",
 		Description: "Set your Steam ID for Steam features, such as using your live Steam nick",
@@ -313,7 +325,7 @@ func init() {
 		cmdMyDuel, cmdAllDuels,
 		cmdLeaderboard, cmdChannel,
 		cmdRank, cmdUnrank, cmdRankRole,
-		cmdSpectate,
+		cmdSpectate, cmdQuote,
 		cmdSteamID,
 	}
 }
@@ -548,7 +560,7 @@ func cmd(session *discordgo.Session, interaction *discordgo.InteractionCreate, c
 				Content: "Syncing ranks...",
 			},
 		})
-		rankEmbed := leaderboards[interaction.GuildID].ApplyRank(player, rank, position, true, false).(*discordgo.MessageEmbed)
+		rankEmbed := leaderboards[interaction.GuildID].ApplyRank(player, rank, position, true, true).(*discordgo.MessageEmbed)
 		_, err := Discord.InteractionResponseEdit(interaction.Interaction, &discordgo.WebhookEdit{
 			Embeds: &[]*discordgo.MessageEmbed{rankEmbed},
 		})
@@ -641,13 +653,10 @@ func cmd(session *discordgo.Session, interaction *discordgo.InteractionCreate, c
 			leaderboards[interaction.GuildID].ActiveDuels[duelIndex].Players = players
 		}
 
-		leaderboards[interaction.GuildID].Spectators[interaction.Member.User.ID] = player
+		leaderboards[interaction.GuildID].ActiveDuels[duelIndex].Spectators[interaction.Member.User.ID] = NewSpec(player, interaction.Interaction)
 		leaderboards[interaction.GuildID].ActiveDuels[duelIndex].Start()
 
-		specEmbed := embed.NewEmbed().
-			SetTitle(leaderboards[interaction.GuildID].ActiveDuels[duelIndex].Title(interaction.GuildID)).
-			SetDescription(leaderboards[interaction.GuildID].ActiveDuels[duelIndex].Scores()).
-			SetColor(config.ColorMain)
+		specEmbed := leaderboards[interaction.GuildID].ActiveDuels[duelIndex].Embed(interaction.GuildID).(*embed.Embed)
 
 		return &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -658,6 +667,13 @@ func cmd(session *discordgo.Session, interaction *discordgo.InteractionCreate, c
 				Flags: discordgo.MessageFlagsEphemeral,
 			},
 		}
+	case "quote":
+		if !isStaff {
+			return embed.NewErrorEmbed("Missing Permissions", "I'm sorry, Dave. I'm afraid I can't do that.")
+		}
+
+		quote := opts[0].StringValue()
+		leaderboards[interaction.GuildID].DuelQuote(interaction.Member.User.ID, quote)
 	case "cancel":
 		if !isStaff {
 			return embed.NewErrorEmbed("Missing Permissions", "I'm sorry, Dave. I'm afraid I can't do that.")

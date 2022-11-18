@@ -4,6 +4,15 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+type Spec struct {
+	PlayerID        string                 `json:"playerID"`        //The player being spectated
+	LastInteraction *discordgo.Interaction `json:"lastInteraction"` //The last interaction from the spec
+}
+
+func NewSpec(playerID string, interaction *discordgo.Interaction) *Spec {
+	return &Spec{PlayerID: playerID, LastInteraction: interaction}
+}
+
 var (
 	specComponents = []discordgo.MessageComponent{
 		discordgo.ActionsRow{

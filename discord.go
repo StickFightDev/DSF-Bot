@@ -12,11 +12,38 @@ type DiscordClient struct {
 	User *discordgo.User
 }
 func (dc *DiscordClient) Shutdown() {
+	dc.Sync()
+	if err := dc.Offline(); err != nil {
+		log.Error(err)
+	}
+	if err := dc.Close(); err != nil {
+		log.Error(err)
+	}
+}
+func (dc *DiscordClient) Sync() {
 	log.Info("... Saving states")
 	if err := saveJSON(leaderboards, "states/leaderboards.json"); err != nil {
 		log.Error(err)
+	} else {
+		log.Info("Saved states successfully")
 	}
-	log.Info("Good-bye!")
+}
+
+func (dc *DiscordClient) Online() error {
+	idleSince := int(0)
+	return dc.UpdateStatusComplex(discordgo.UpdateStatusData{
+		IdleSince: &idleSince,
+		AFK: false,
+		Status: "",
+	})
+}
+func (dc *DiscordClient) Offline() error {
+	idleSince := int(1)
+	return dc.UpdateStatusComplex(discordgo.UpdateStatusData{
+		IdleSince: &idleSince,
+		AFK: true,
+		Status: "",
+	})
 }
 
 func (dc *DiscordClient) RegisterApplicationCmds() {
@@ -48,6 +75,8 @@ func (dc *DiscordClient) RegisterApplicationCmds() {
 }
 
 func discordReady(session *discordgo.Session, event *discordgo.Ready) {
+	defer Discord.Sync()
+
 	for Discord == nil {
 		if Discord != nil {
 			break //Wait for Discord to finish connecting, just in case we're called early
@@ -56,17 +85,20 @@ func discordReady(session *discordgo.Session, event *discordgo.Ready) {
 	Discord.User = event.User
 	log.Info("Logged into Discord as ", Discord.User, "!")
 
-	log.Info("Loading active duels...")
-	for _, leaderboard := range leaderboards {
-		for duelIndex := range leaderboard.ActiveDuels {
-			leaderboard.TrackDuel(duelIndex)
-		}
+	Discord.RegisterApplicationCmds()
+	if err := Discord.Online(); err != nil {
+		log.Error(err)
 	}
 
-	Discord.RegisterApplicationCmds()
+	log.Info("Loading active duels...")
+	for _, leaderboard := range leaderboards {
+		leaderboard.TrackDuels()
+	}
 }
 
 func discordGuildMemberRemove(session *discordgo.Session, member *discordgo.GuildMemberRemove) {
+	defer Discord.Sync()
+
 	if _, exists := leaderboards[member.GuildID]; exists {
 		leaderboards[member.GuildID].DeletePlayer(member.User.ID)
 	}
@@ -74,13 +106,11 @@ func discordGuildMemberRemove(session *discordgo.Session, member *discordgo.Guil
 
 func discordInteractionCreate(session *discordgo.Session, event *discordgo.InteractionCreate) {
 	log.Trace("INTERACTION: ", event.ID, event.AppID, event.Type, event.Data, event.GuildID, event.ChannelID, event.Message, event.AppPermissions, event.Member, event.User, event.Locale, event.GuildLocale, event.Token, event.Version)
-	
+	defer Discord.Sync()
+
 	//Create a new leaderboard for this guild if it doesn't exist yet
 	if _, exists := leaderboards[event.GuildID]; !exists {
 		leaderboards[event.GuildID] = NewLeaderboard(event.GuildID)
-	}
-	if leaderboards[event.GuildID].Spectators == nil {
-		leaderboards[event.GuildID].Spectators = make(map[string]string)
 	}
 	leaderboards[event.GuildID].InitPlayer(event.Member.User.ID)
 
@@ -117,43 +147,39 @@ func discordInteractionCreate(session *discordgo.Session, event *discordgo.Inter
 		if msgData.ComponentType != discordgo.ButtonComponent {
 			return
 		}
-		if _, exists := leaderboards[event.GuildID].Spectators[event.Member.User.ID]; !exists {
-			return
-		}
 
-		specPlayer := leaderboards[event.GuildID].Spectators[event.Member.User.ID]
-		duelIndex, duel := leaderboards[event.GuildID].GetActiveDuel(specPlayer)
+		duelIndex, duel := leaderboards[event.GuildID].GetSpectatorDuel(event.Member.User.ID)
 		if duelIndex < 0 || duel == nil {
 			return
 		}
 
+		leaderboards[event.GuildID].ActiveDuels[duelIndex].Spectators[event.Member.User.ID].LastInteraction = event.Interaction
+
 		switch msgData.CustomID {
 		case "sWP1":
-			duel.Win(duel.Players[0])
+			leaderboards[event.GuildID].ActiveDuels[duelIndex].Win(duel.Players[0])
 		case "sWP2":
-			duel.Win(duel.Players[1])
+			leaderboards[event.GuildID].ActiveDuels[duelIndex].Win(duel.Players[1])
 		case "sDP1":
-			duel.Discount(duel.Players[0])
+			leaderboards[event.GuildID].ActiveDuels[duelIndex].Discount(duel.Players[0])
 		case "sDP2":
-			duel.Discount(duel.Players[1])
+			leaderboards[event.GuildID].ActiveDuels[duelIndex].Discount(duel.Players[1])
 		case "sFP1":
-			duel.Forfeit(duel.Players[0])
+			leaderboards[event.GuildID].ActiveDuels[duelIndex].Forfeit(duel.Players[0])
 		case "sFP2":
-			duel.Forfeit(duel.Players[1])
+			leaderboards[event.GuildID].ActiveDuels[duelIndex].Forfeit(duel.Players[1])
 		}
 
-		specEmbed := embed.NewEmbed().
-			SetTitle(duel.Title(event.GuildID)).
-			SetDescription(duel.Scores()).
-			SetColor(config.ColorMain)
+		specEmbed := leaderboards[event.GuildID].ActiveDuels[duelIndex].Embed(event.GuildID).(*embed.Embed)
 		components := specComponents
 
-		duelIndex, _ = leaderboards[event.GuildID].GetActiveDuel(specPlayer)
+		duelIndex, _ = leaderboards[event.GuildID].GetSpectatorDuel(event.Member.User.ID)
 		if duelIndex < 0 || duelIndex >= len(leaderboards[event.GuildID].ActiveDuels) {
-			components = nil
-			specEmbed = duel.Embed(event.GuildID).(*embed.Embed)
+			components = make([]discordgo.MessageComponent, 0)
 		} else {
-			leaderboards[event.GuildID].ActiveDuels[duelIndex] = duel
+			if len(leaderboards[event.GuildID].ActiveDuels[duelIndex].Winners) > 0 {
+				specEmbed.SetFooter("Please use /quote to provide the winner's quote! The duel won't archive and the result won't post until then.")
+			}
 		}
 
 		resp := &discordgo.InteractionResponse{
@@ -166,11 +192,13 @@ func discordInteractionCreate(session *discordgo.Session, event *discordgo.Inter
 			},
 		}
 
-		err := session.InteractionRespond(event.Interaction, resp)
-		if err != nil {
-			log.Error(err)
-		} else {
-			log.Debug("Responded to button ", msgData.CustomID, " with response: ", fmt.Sprintf("%v", resp))
+		for spectator, _ := range leaderboards[event.GuildID].ActiveDuels[duelIndex].Spectators {
+			if err := session.InteractionRespond(leaderboards[event.GuildID].ActiveDuels[duelIndex].Spectators[spectator].LastInteraction, resp); err != nil {
+				log.Error(err)
+				delete(leaderboards[event.GuildID].ActiveDuels[duelIndex].Spectators, spectator)
+			} else {
+				log.Debug("Responded to button ", msgData.CustomID, " with response: ", fmt.Sprintf("%v", resp))
+			}
 		}
 	}
 }

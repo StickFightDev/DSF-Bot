@@ -18,10 +18,16 @@ type Duel struct {
 	Unranked     bool     `json:"unranked"`      //If unranked, this duel shouldn't apply leaderboard progressions
 
 	Expires      time.Time             `json:"expires"`      //When this duel should expire
+	Warned72     bool                  `json:"warned72"`     //If the participants were warned about 3 days remaining
+	Warned24     bool                  `json:"warned24"`     //If the participants were warned about 1 day remaining
+	Warned1      bool                  `json:"warned1"`      //If the participants were warned about 1 hour remaining
 	CurrentRound int                   `json:"currentRound"` //0 indicates not started, and > RoundLimit indicates a finished duel
 	DuelStats    map[string]*DuelStats `json:"duelStats"`    //Current player statistics for the duel, where key is Discord user ID
+	Spectators   map[string]*Spec      `json:"specs"`        //Map of duel spectators, where key is spectator's Discord user ID
 	Winners      []string              `json:"winners"`      //Empty until duel is won
 	Losers       []string              `json:"losers"`       //Empty until duel is won
+	Quote        string                `json:"quote"`        //The winner's quote
+	Ended        bool                  `json:"ended"`        //If a quote is marked as ended
 }
 
 type DuelStats struct {
@@ -95,6 +101,7 @@ func (d *Duel) TitleWithMentions() string {
 }
 func (d *Duel) Scores() string {
 	scores := ""
+	winMethod := ""
 	for i := 0; i < d.RoundLimit; i++ {
 		if i == (d.CurrentRound-1) {
 			scores += "> "
@@ -114,6 +121,11 @@ func (d *Duel) Scores() string {
 				winner = d.Players[j]
 				winnerScore = d.DuelStats[d.Players[j]].Scores[i]
 			}
+			if d.DuelStats[d.Players[j]].Forfeit {
+				winMethod = " by forfeit"
+			} else if d.DuelStats[d.Players[j]].ForcedWinner {
+				winMethod = " by forced win"
+			}
 		}
 		if i < d.CurrentRound-1 {
 			scores += ": **" + mention(winner, d.GuildID, false) + "**"
@@ -123,7 +135,11 @@ func (d *Duel) Scores() string {
 		}
 	}
 	if len(d.Winners) > 0 && len(d.Losers) > 0 {
-		scores += fmt.Sprintf("\n%s wins: %d - %d", mention(d.Winners[0], d.GuildID, false), d.DuelStats[d.Winners[0]].FinalScore, d.DuelStats[d.Losers[0]].FinalScore)
+		if d.Quote != "" {
+			scores += fmt.Sprintf("\n%s \"%s\" wins%s: %d - %d", mention(d.Winners[0], d.GuildID, false), d.Quote, winMethod, d.DuelStats[d.Winners[0]].FinalScore, d.DuelStats[d.Losers[0]].FinalScore)
+		} else {
+			scores += fmt.Sprintf("\n%s wins%s: %d - %d", mention(d.Winners[0], d.GuildID, false), winMethod, d.DuelStats[d.Winners[0]].FinalScore, d.DuelStats[d.Losers[0]].FinalScore)
+		}
 	}
 	return scores
 }
@@ -145,9 +161,9 @@ func (d *Duel) Embed(guildID string) interface{} {
 			}
 		}
 		spectators := ""
-		for spectator, _ := range leaderboards[d.GuildID].Spectators {
+		for spectator, _ := range d.Spectators {
 			if spectators != "" {
-				spectators += ", "
+				spectators += "\n"
 			}
 			spectators += mention(spectator, guildID, false)
 		}
@@ -189,6 +205,7 @@ func NewDuel(guildID, dueler string, players []string, roundLimit, scoreLimit in
 		Unranked: unranked,
 		Expires: time.Now().AddDate(0, 0, 7),
 		DuelStats: duelStats,
+		Spectators: make(map[string]*Spec),
 	}
 }
 

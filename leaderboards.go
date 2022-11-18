@@ -26,7 +26,6 @@ type Leaderboard struct {
 	DuelHistory      []*Duel            `json:"duelHistory"`      //Duel graveyard for historical archives
 	Ranks            []*Rank            `json:"ranks"`            //In-order list of ranks
 	Players          map[string]*Player `json:"players"`          //Map of raw players and their stats, where key is Discord user ID
-	Spectators       map[string]string  `json:"spectators"`       //Map of spectated duel players, where key is spectator's Discord user ID
 }
 
 func NewLeaderboard(guildID string) *Leaderboard {
@@ -36,15 +35,8 @@ func NewLeaderboard(guildID string) *Leaderboard {
 		DuelHistory: make([]*Duel, 0),
 		Ranks: config.Ranks,
 		Players: make(map[string]*Player),
-		Spectators: make(map[string]string),
 	}
 	return l
-}
-
-type Spec struct {
-	DuelIndex int
-	ChannelID string `json:"channelID"` //The channel of the spec message
-	MessageID string `json:"messageID"` //The spec message to update with new scores
 }
 
 type Rank struct {
@@ -208,7 +200,7 @@ func (l *Leaderboard) ApplyRank(duelee, newRank string, position int, fixRanks b
 	if !skipCancel {
 		l.DuelCancel(duelee)
 	}
-	
+
 	for rankIndex, rank := range l.Ranks {
 		if rank.Rank == newRank {
 			if position < 1 {
@@ -247,100 +239,84 @@ func (l *Leaderboard) ApplyRank(duelee, newRank string, position int, fixRanks b
 	return embed.NewErrorEmbed("Ranker", "%s is now unranked.", mention(duelee, l.GuildID, false))
 }
 
-func (l *Leaderboard) TrackDuel(duelIndex int) {
-	if duelIndex < 0 || duelIndex >= len(l.ActiveDuels) {
-		return
-	}
+func (l *Leaderboard) TrackDuels() {
+	go func(l *Leaderboard) {
+		for {
+			for i := 0; i < len(l.ActiveDuels); i++ {
+				duel := l.ActiveDuels[i]
+				duelEmbed := duel.Embed(l.GuildID).(*embed.Embed)
+				duelEmbed.SetDescription(duel.Title(l.GuildID))
 
-	duel := l.ActiveDuels[duelIndex]
-	waitDuration := duel.Expires.Sub(time.Now())
-	time.AfterFunc(waitDuration, func() {
-		//Make sure the duel still exists by time it expires
-		_, active := l.GetActiveDuel(duel.Dueler)
-		if active == nil {
-			return
-		}
-
-		for _, player := range duel.Players {
-			if player == duel.Dueler {
-				continue
-			}
-
-			_ = l.DuelForfeit(player, false)
-			break
-		}
-
-		duelEmbed := duel.Embed(l.GuildID).(*embed.Embed)
-		duelEmbed.SetTitle("Duel Expired")
-		duelEmbed.SetDescription(duel.Title(l.GuildID))
-		Discord.ChannelMessageSendComplex(l.ChannelReminders, &discordgo.MessageSend{
-			Embed: duelEmbed.MessageEmbed,
-		})
-	})
-
-	//Prepare notices for additional reminders
-	if waitDuration.Hours() > 72 {
-		remindDay3 := duel.Expires.Add(time.Hour * -72)
-		remindDuration := remindDay3.Sub(time.Now())
-		time.AfterFunc(remindDuration, func() {
-			duelEmbed := duel.Embed(l.GuildID).(*embed.Embed)
-			duelEmbed.SetTitle("3 Day Duel Warning")
-			duelEmbed.SetDescription(duel.Title(l.GuildID))
-			//send DM to duelers
-			for _, player := range duel.Players {
-				privChannel, err := Discord.UserChannelCreate(player)
-				if err != nil {
-					log.Trace(err)
+				waitHours := duel.Expires.Sub(time.Now()).Hours()
+				if waitHours <= 0 { //Duel expired
+					for _, player := range duel.Players {
+						if player == duel.Dueler {
+							continue
+						}
+						_ = l.DuelForfeit(player, false)
+						break
+					}
+					duelEmbed.SetTitle("Duel Expired")
+				} else if waitHours <= 1 {
+					if !duel.Warned1 {
+						l.ActiveDuels[i].Warned1 = true
+						duelEmbed.SetTitle("1 Hour Remaining")
+					} else {
+						duelEmbed = nil
+					}
+				} else if waitHours <= 24 {
+					if !duel.Warned24 {
+						l.ActiveDuels[i].Warned24 = true
+						duelEmbed.SetTitle("24 Hours Remaining")
+					} else {
+						duelEmbed = nil
+					}
+				} else if waitHours <= 72 {
+					if !duel.Warned72 {
+						l.ActiveDuels[i].Warned72 = true
+						duelEmbed.SetTitle("72 Hours Remaining")
+					} else {
+						duelEmbed = nil
+					}
 				} else {
-					_, err := Discord.ChannelMessageSendComplex(privChannel.ID, &discordgo.MessageSend{
-						Embed: duelEmbed.MessageEmbed,
-					})
-					if err != nil {
-						log.Error(err)
-						_, err = Discord.ChannelMessageSendComplex(l.ChannelReminders, &discordgo.MessageSend{
-							Content: duel.TitleWithMentions(),
-							Embed: duelEmbed.MessageEmbed,
-						})
+					duelEmbed = nil
+				}
+
+				if duelEmbed != nil {
+					defer Discord.Sync()
+
+					privError := false
+					for _, player := range duel.Players {
+						privChannel, err := Discord.UserChannelCreate(player)
 						if err != nil {
 							log.Error(err)
+							privError = true
+							break
 						}
-						return
+						if _, err := Discord.ChannelMessageSendComplex(privChannel.ID, &discordgo.MessageSend{
+							Embed: duelEmbed.MessageEmbed,
+						}); err != nil {
+							log.Error(err)
+							privError = true
+							break
+						}
+					}
+
+					if privError {
+						//Send a global message instead, and break the loop so we don't DM anyone else
+						if _, err := Discord.ChannelMessageSendComplex(l.ChannelReminders, &discordgo.MessageSend{
+							Content: duel.TitleWithMentions(),
+							Embed: duelEmbed.MessageEmbed,
+						}); err != nil {
+							log.Error(err)
+						}
 					}
 				}
 			}
-		})
-	}
-	if waitDuration.Hours() > 24 {
-		remindDay1 := duel.Expires.Add(time.Hour * -24)
-		remindDuration := remindDay1.Sub(time.Now())
-		time.AfterFunc(remindDuration, func() {
-			duelEmbed := duel.Embed(l.GuildID).(*embed.Embed)
-			duelEmbed.SetTitle("1 Day Duel Warning")
-			duelEmbed.SetDescription(duel.Title(l.GuildID))
-			//send DM to duelers
-			for _, player := range duel.Players {
-				privChannel, err := Discord.UserChannelCreate(player)
-				if err != nil {
-					log.Trace(err)
-				} else {
-					_, err := Discord.ChannelMessageSendComplex(privChannel.ID, &discordgo.MessageSend{
-						Embed: duelEmbed.MessageEmbed,
-					})
-					if err != nil {
-						log.Error(err)
-						_, err = Discord.ChannelMessageSendComplex(l.ChannelReminders, &discordgo.MessageSend{
-							Content: duel.TitleWithMentions(),
-							Embed: duelEmbed.MessageEmbed,
-						})
-						if err != nil {
-							log.Error(err)
-						}
-						return
-					}
-				}
-			}
-		})
-	}
+
+			time.Sleep(time.Minute * 1)
+		}
+	}(l)
 }
 
 func (l *Leaderboard) NewDuel(dueler string, duelees []string, roundLimit, scoreLimit int, force, unranked bool) interface{} {
@@ -417,7 +393,6 @@ func (l *Leaderboard) NewDuel(dueler string, duelees []string, roundLimit, score
 	duelees = append([]string{dueler}, duelees...)
 	duel := NewDuel(l.GuildID, dueler, duelees, roundLimit, scoreLimit, unranked)
 	l.ActiveDuels = append(l.ActiveDuels, duel) //Add the new duel to the list of active duels
-	l.TrackDuel(len(l.ActiveDuels)-1) //Track the new duel
 
 	duelEmbed := duel.Embed(l.GuildID).(*embed.Embed)
 
@@ -472,6 +447,10 @@ func (l *Leaderboard) DuelForfeit(duelee string, forceDropRank bool) interface{}
 			rI++
 			rP = 1
 		}
+		if rI >= len(l.Ranks) {
+			rI = len(l.Ranks)-1
+		}
+
 		l.ApplyRank(duelee, l.Ranks[rI].Rank, rP, true, true)
 	}
 
@@ -524,40 +503,18 @@ func (l *Leaderboard) DuelShorten(duelee, duration string) interface{} {
 
 func (l *Leaderboard) DuelEnd(duel *Duel) {
 	if activeIndex, _ := l.GetActiveDuel(duel.Dueler); activeIndex >= 0 {
-		for spectator, spec := range l.Spectators {
-			for _, player := range duel.Players {
-				if spec == player {
-					delete(l.Spectators, spectator)
-					break
-				}
-			}
+		if duel.Ended {
+			return
 		}
+		defer Discord.Sync()
 
-		winners := ""
 		for _, winner := range duel.Winners {
-			if winners != "" {
-				winners += ", "
-			}
-			winners += fmt.Sprintf("**%d** - %s", duel.DuelStats[winner].FinalScore, mention(winner, l.GuildID, false))
 			l.Players[winner].MatchesWon++
 			l.Players[winner].ImmuneUntil = time.Now().AddDate(0, 0, 1)
 		}
 
-		losers := ""
 		for _, loser := range duel.Losers {
-			if losers != "" {
-				losers += ", "
-			}
-			losers += fmt.Sprintf("**%d** - %s", duel.DuelStats[loser].FinalScore, mention(loser, l.GuildID, false))
 			l.Players[loser].MatchesLost++
-		}
-
-		duelEmbed := duel.Embed(l.GuildID).(*embed.Embed)
-		if !duel.Unranked {
-			_, err := Discord.ChannelMessageSendComplex(l.ChannelResults, &discordgo.MessageSend{
-				Embed: duelEmbed.MessageEmbed,
-			})
-			log.Trace(err)
 		}
 
 		//Apply leaderboard progression for the winner
@@ -579,7 +536,28 @@ func (l *Leaderboard) DuelEnd(duel *Duel) {
 			}
 		}
 
-		l.ArchiveDuel(activeIndex)
+		l.ActiveDuels[activeIndex].Ended = true
+	}
+}
+
+func (l *Leaderboard) DuelQuote(spectator, quote string) {
+	if duelIndex, _ := l.GetSpectatorDuel(spectator); duelIndex >= 0 {
+		if l.ActiveDuels[duelIndex].Ended {
+			quote = strings.ReplaceAll(quote, "\"", "")
+			quote = strings.ReplaceAll(quote, "\n", "")
+			l.ActiveDuels[duelIndex].Quote = quote
+			
+			duelEmbed := l.ActiveDuels[duelIndex].Embed(l.GuildID).(*embed.Embed)
+			if !l.ActiveDuels[duelIndex].Unranked {
+				if _, err := Discord.ChannelMessageSendComplex(l.ChannelResults, &discordgo.MessageSend{
+					Embed: duelEmbed.MessageEmbed,
+				}); err != nil {
+					log.Error(err)
+				}
+			}
+
+			l.ArchiveDuel(duelIndex)
+		}
 	}
 }
 
@@ -595,6 +573,16 @@ func (l *Leaderboard) GetActiveDuel(duelee string) (int, *Duel) {
 		for _, activePlayer := range active.Players {
 			if activePlayer == duelee {
 				l.ActiveDuels[activeIndex].Init()
+				return activeIndex, active
+			}
+		}
+	}
+	return -1, nil
+}
+func (l *Leaderboard) GetSpectatorDuel(spectator string) (int, *Duel) {
+	for activeIndex, active := range l.ActiveDuels {
+		for activeSpec, _ := range active.Spectators {
+			if activeSpec == spectator {
 				return activeIndex, active
 			}
 		}
@@ -648,6 +636,7 @@ func (l *Leaderboard) EmbedStats(guildID, requesterID, playerID string) interfac
 
 	if _, active := l.GetActiveDuel(playerID); active != nil {
 		duelEmbed = active.Embed(l.GuildID).(*embed.Embed)
+		duelEmbed.SetDescription(active.EmbedField(l.GuildID).Value)
 	}
 
 	rankIndex, rankPos := l.GetRank(playerID)

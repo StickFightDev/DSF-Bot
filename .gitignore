@@ -2,7 +2,7 @@
 config*.json
 
 # Bot save states
-states/
+states*
 
 # Output executables
 *.exe
@@ -11,6 +11,7 @@ states/
 
 # Log files
 *.log
+log*
 
 # Supervise
 run
